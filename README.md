@@ -2,7 +2,7 @@
 
 # qtOutlawQoL
 
-**Crafting tab, break-down all, shift-click smart deposit, and lockbox sort for OutlawCraft.**
+**Crafting tab, break-down all, smart deposit, lockbox sort, leave-one withdraw, and recipe alt-click for OutlawCraft.**
 
 <br/>
 
@@ -25,9 +25,11 @@
 | | |
 | :---: | :--- |
 | **Crafting tab** | A tab under the spellbook school tabs that opens the Blueprints window. |
-| **Break down all** | An All button on the Break down header. Each ready piece is its own cast, and the next waits until that piece is gone. |
+| **Break down all** | An All button on the Break down header. Each ready piece is its own cast, and the next waits until that piece is gone. The tooltip lists the batch's total yield. Alt-click a piece to leave it out until you reload. |
 | **Smart deposit** | Shift-click Deposit All to send only stacks the chest already holds. Shift-click a bag item to pour in every stack of it, and only when the open chest already has that item. An unfinished stack in the chest is taken out first so it can join the one in your bags, then the stack goes back. A plain click is still Deposit All. |
 | **Lockbox sort** | Open stacks of the same item are taken out and put straight back so they join, then the columns fill downward. Common on the left, rarer to the right. |
+| **Leave one** | Alt-click a stack in the chest to take it out and put one back. A single item still equips. This needs a free bag slot. |
+| **Recipe alt-click** | Alt-click a material in the Blueprints window to open the recipe that makes it. Alt-click again when more than one recipe makes that item. |
 
 </div>
 
