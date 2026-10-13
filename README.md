@@ -26,8 +26,8 @@
 | :---: | :--- |
 | **Crafting tab** | A tab under the spellbook school tabs that opens the Blueprints window. |
 | **Break down all** | An All button on the Break down header. Each ready piece is its own cast, and the next waits until that piece is gone. |
-| **Smart deposit** | Shift-click Deposit All to send only stacks the chest already holds. Shift-click a bag item to pour in every stack of it, and only when the open chest already has that item. A plain click is still Deposit All. |
-| **Lockbox sort** | Columns fill downward. Common on the left, rarer to the right. The same item keeps its own column when the grid has room. One move at a time. |
+| **Smart deposit** | Shift-click Deposit All to send only stacks the chest already holds. Shift-click a bag item to pour in every stack of it, and only when the open chest already has that item. An unfinished stack in the chest is taken out first so it can join the one in your bags, then the stack goes back. A plain click is still Deposit All. |
+| **Lockbox sort** | Open stacks of the same item are taken out and put straight back so they join, then the columns fill downward. Common on the left, rarer to the right. |
 
 </div>
 

@@ -2,7 +2,7 @@
 ## Title: |cff1784d1qt|rOutlawQoL
 ## Notes: Crafting tab, break-down all, shift-click smart deposit, and lockbox sort for OutlawCraft.
 ## Author: QT
-## Version: 1.0
+## Version: 1.1
 ## OptionalDeps: OutlawCraft
 ## SavedVariables: qtOutlawQoLDB
 

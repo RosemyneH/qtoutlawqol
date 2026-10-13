@@ -2,7 +2,9 @@ local _G = _G
 local ipairs = ipairs
 local tostring = tostring
 local GetContainerItemID = GetContainerItemID
+local GetContainerItemInfo = GetContainerItemInfo
 local GetContainerNumSlots = GetContainerNumSlots
+local GetItemInfo = GetItemInfo
 local GetSpellInfo = GetSpellInfo
 local GetTime = GetTime
 local IsAltKeyDown = IsAltKeyDown
@@ -15,6 +17,7 @@ local db
 local refresh = {}
 local installed = {}
 local booted
+local boxBusy
 
 local function EnsureDB()
 	if db then return db end
@@ -262,10 +265,237 @@ local function InstallBreak(OC)
 	return true
 end
 
+-- ʕ •ᴥ•ʔ✿ The chest cannot merge a partial where it sits. Take that stack out, let the bags finish it, then put the stack back ✿ ʕ •ᴥ•ʔ
+local stackDeposit
+
+local function StackDeposit(OC)
+	if stackDeposit then return stackDeposit end
+	if not (OC.Send and OC.CMD_DEPOSIT and OC.Lockbox and OC.Lockbox.Render) then return end
+
+	local job
+	local waiter = CreateFrame("Frame")
+	waiter:Hide()
+	waiter:RegisterEvent("BAG_UPDATE")
+
+	local function Signature()
+		local parts = {}
+		local items = OC.Lockbox.items or {}
+		for i = 1, #items do
+			local it = items[i]
+			if it and it.index ~= nil then
+				parts[#parts + 1] = it.index .. "=" .. (it.entry or 0) .. ":" .. (it.count or 0)
+			end
+		end
+		table.sort(parts)
+		return table.concat(parts, "|")
+	end
+
+	local function RowsFor(entry, quality)
+		local rows, total, locked = {}, 0, false
+		for b = 0, 4 do
+			for s = 1, GetContainerNumSlots(b) or 0 do
+				if GetContainerItemID(b, s) == entry then
+					local _, count, isLocked, rowQuality = GetContainerItemInfo(b, s)
+					if (rowQuality or 0) == quality then
+						if isLocked then
+							locked = true
+						else
+							count = count or 0
+							rows[#rows + 1] = { bag = b, slot = s, count = count }
+							total = total + count
+						end
+					end
+				end
+			end
+		end
+		return rows, total, locked
+	end
+
+	local function MaxStack(entry)
+		local max = GetItemInfo and select(8, GetItemInfo(entry))
+		if max and max > 1 then return max end
+	end
+
+	local function Partial(entry, quality, maxStack)
+		if not maxStack then return end
+		local best
+		local items = OC.Lockbox.items
+		if not items then return end
+		for i = 1, #items do
+			local it = items[i]
+			local count = it and it.count or 0
+			if it and not it.coin and tonumber(it.entry) == entry and (it.quality or 0) == quality and it.index ~= nil and count > 0 and count < maxStack then
+				if not best or count < (best.count or 0) then best = it end
+			end
+		end
+		return best
+	end
+
+	local function Stop(reason)
+		if not job then return end
+		job = nil
+		if boxBusy == "deposit" then boxBusy = nil end
+		waiter:Hide()
+		if reason and reason ~= false then OC.Print("Deposit stopped: " .. reason .. ".") end
+	end
+
+	local Step
+	local function Advance()
+		if not job or not job.wait then return end
+		if not OC.Lockbox.IsOpen() then return Stop(false) end
+		if job.warm then return end
+		local item = job.items[1]
+		if not item then return end
+		if job.locked then
+			local rows = RowsFor(item.entry, item.quality)
+			if rows[1] then
+				job.locked = nil
+				job.wait = false
+				Step()
+			end
+			return
+		end
+		local sig = Signature()
+		local _, total = RowsFor(item.entry, item.quality)
+		local chestMoved = sig ~= job.sig
+		if job.need then
+			if chestMoved and total >= job.need then
+				job.wait = false
+				job.sig = sig
+				Step()
+			end
+		elseif total < (job.bag or 0) then
+			job.wait = false
+			job.sig = sig
+			Step()
+		end
+	end
+
+	function Step()
+		if not job then return end
+		if not OC.Lockbox.IsOpen() or OC.Lockbox.readOnly then return Stop(false) end
+		if GetCursorInfo and GetCursorInfo() then return Stop("you are holding something") end
+		if job.wait then return end
+		if job.moves >= job.limit then return Stop("it was going round in circles") end
+
+		while job.items[1] do
+			local item = job.items[1]
+			local rows, total, locked = RowsFor(item.entry, item.quality)
+			local maxStack = MaxStack(item.entry)
+			if not maxStack and not item.warmed then
+				if OC.UI and OC.UI.WarmItem then OC.UI.WarmItem(item.entry) end
+				item.warmed = true
+				job.warm = true
+				job.wait = true
+				job.since = GetTime()
+				return
+			end
+			local partial = Partial(item.entry, item.quality, maxStack)
+			if partial and total > 0 and OC.CMD_TAKEONE then
+				local token = "T" .. partial.index
+				if job.last == token then return Stop("a take was refused") end
+				job.last = token
+				job.moves = job.moves + 1
+				job.wait = true
+				job.since = GetTime()
+				job.sig = Signature()
+				job.bag = total
+				job.need = total + (partial.count or 0)
+				OC.Send(OC.CMD_TAKEONE .. partial.index)
+				return
+			end
+			local row = rows[1]
+			if row then
+				local token = "D" .. row.bag .. "," .. row.slot
+				if job.last == token then return Stop("a deposit was refused") end
+				job.last = token
+				job.moves = job.moves + 1
+				job.wait = true
+				job.since = GetTime()
+				job.sig = Signature()
+				job.bag = total
+				job.need = nil
+				OC.Send(OC.CMD_DEPOSIT .. row.bag .. "," .. row.slot)
+				return
+			end
+			if locked then
+				job.locked = true
+				job.wait = true
+				job.need = nil
+				job.since = GetTime()
+				return
+			end
+			table.remove(job.items, 1)
+			job.last = nil
+		end
+		Stop(false)
+	end
+
+	waiter:SetScript("OnEvent", Advance)
+	waiter:SetScript("OnUpdate", function()
+		if not job or not job.wait then return end
+		if not OC.Lockbox.IsOpen() then return Stop(false) end
+		if job.warm and GetTime() - job.since > 0.4 then
+			job.warm = nil
+			job.wait = false
+			Step()
+			return
+		end
+		if GetTime() - job.since > 5 then Stop("a move did not finish") end
+	end)
+	hooksecurefunc(OC.Lockbox, "Render", Advance)
+	if OC.Lockbox.frame then
+		OC.Lockbox.frame:HookScript("OnHide", function()
+			if job then Stop(false) end
+		end)
+	end
+
+	local function Start(items)
+		if job or not items or #items == 0 then return end
+		if not OC.Lockbox.IsOpen() or OC.Lockbox.readOnly then return end
+		if boxBusy == "sort" then
+			OC.Print("Sort is still running.")
+			return
+		end
+		if GetCursorInfo and GetCursorInfo() then
+			OC.Print("Deposit: you are holding something.")
+			return
+		end
+		job = { items = items, moves = 0, limit = 200, wait = false, since = GetTime(), sig = Signature() }
+		boxBusy = "deposit"
+		waiter:Show()
+		Step()
+	end
+
+	stackDeposit = Start
+	return Start
+end
+
+local function DepositQueue(OC, onlyEntry, onlyQuality)
+	local seen, list = {}, {}
+	for b = 0, 4 do
+		for s = 1, GetContainerNumSlots(b) or 0 do
+			local entry = GetContainerItemID(b, s)
+			if entry and ContainerHas(OC, entry) then
+				local quality = select(4, GetContainerItemInfo(b, s)) or 0
+				if not onlyEntry or (entry == onlyEntry and quality == (onlyQuality or 0)) then
+					local key = entry .. ":" .. quality
+					if not seen[key] then
+						seen[key] = true
+						list[#list + 1] = { entry = entry, quality = quality }
+					end
+				end
+			end
+		end
+	end
+	return list
+end
+
 -- ʕ •ᴥ•ʔ✿ Shift-click Deposit All sends bag stacks the chest already holds. A plain click is still Deposit All ✿ ʕ •ᴥ•ʔ
 local function InstallDeposit(OC)
 	local depositAll = OC.Lockbox and OC.Lockbox.depositAllButton
 	if not (depositAll and OC.Lockbox.DepositAll and OC.Send and OC.CMD_DEPOSIT) then return false end
+	if not StackDeposit(OC) then return false end
 
 	depositAll:SetScript("OnClick", function()
 		if not db.deposit or not IsShiftKeyDown() or IsAltKeyDown() or IsControlKeyDown() then
@@ -273,20 +503,13 @@ local function InstallDeposit(OC)
 			return
 		end
 		if OC.Lockbox.readOnly or not OC.Lockbox.IsOpen() then return end
-		for b = 0, 4 do
-			for s = 1, GetContainerNumSlots(b) or 0 do
-				local entry = GetContainerItemID(b, s)
-				if ContainerHas(OC, entry) then
-					OC.Send(OC.CMD_DEPOSIT .. b .. "," .. s)
-				end
-			end
-		end
+		stackDeposit(DepositQueue(OC))
 	end)
 	depositAll:HookScript("OnEnter", function()
 		GameTooltip:SetOwner(depositAll, "ANCHOR_TOP")
 		GameTooltip:SetText("Deposit All")
 		if db.deposit then
-			GameTooltip:AddLine("Shift-click deposits only items already in the chest.", 1, 1, 1, true)
+			GameTooltip:AddLine("Shift-click deposits only items already in the chest. An open stack in the chest is taken out so it can join the one in your bags, then the stack goes back.", 1, 1, 1, true)
 		end
 		GameTooltip:Show()
 	end)
@@ -461,6 +684,7 @@ local function InstallSort(OC)
 		if not sorting then return end
 		local moves = sorting.moves
 		sorting = nil
+		if boxBusy == "sort" then boxBusy = nil end
 		sorter:Hide()
 		sortButton:SetText("Sort")
 		if reason == false then return end
@@ -483,11 +707,191 @@ local function InstallSort(OC)
 		sortButton:SetText(sorting and "Stop" or "Sort")
 	end
 
+	local function BagRows(entry)
+		local rows, total, held = {}, 0, 0
+		entry = tonumber(entry)
+		for b = 0, 4 do
+			for s = 1, GetContainerNumSlots(b) or 0 do
+				local id = GetContainerItemID(b, s)
+				if id and tonumber(id) == entry then
+					local _, count, isLocked = GetContainerItemInfo(b, s)
+					count = count or 0
+					held = held + count
+					if not isLocked then
+						rows[#rows + 1] = { bag = b, slot = s, count = count }
+						total = total + count
+					end
+				end
+			end
+		end
+		return rows, total, held
+	end
+
+	local function EmptySlots()
+		local n = 0
+		for b = 0, 4 do
+			for s = 1, GetContainerNumSlots(b) or 0 do
+				if not GetContainerItemID(b, s) then n = n + 1 end
+			end
+		end
+		return n
+	end
+
+	local function Cap(entry)
+		local max = select(8, GetItemInfo(entry))
+		if max and max > 1 then return max end
+	end
+
+	-- ʕ •ᴥ•ʔ✿ Open stacks of one item. The chest will not join them, so they have to leave and come back ✿ ʕ •ᴥ•ʔ
+	local function Partials(entry, taken)
+		local cap = Cap(entry)
+		local list = {}
+		local items = OC.Lockbox.items or {}
+		for i = 1, #items do
+			local it = items[i]
+			local count = it and it.count or 0
+			if it and not it.coin and tonumber(it.entry) == entry and it.index ~= nil and count > 0 and not (taken and taken[it.index]) then
+				if cap and count < cap then list[#list + 1] = it end
+			end
+		end
+		table.sort(list, function(a, b)
+			if (a.count or 0) ~= (b.count or 0) then return (a.count or 0) < (b.count or 0) end
+			return (a.index or 0) < (b.index or 0)
+		end)
+		return list
+	end
+
+	local function NextSplit()
+		local seen = {}
+		local items = OC.Lockbox.items or {}
+		for i = 1, #items do
+			local it = items[i]
+			local entry = it and not it.coin and tonumber(it.entry)
+			if entry and entry ~= 0 and not seen[entry] and not (sorting.done and sorting.done[entry]) then
+				seen[entry] = true
+				if #Partials(entry) >= 2 then return entry end
+			end
+		end
+	end
+
+	local function CanTake(entry, count)
+		if EmptySlots() > 0 then return true end
+		local cap = Cap(entry)
+		if not cap then return false end
+		local rows = BagRows(entry)
+		for i = 1, #rows do
+			if (rows[i].count or 0) + count <= cap then return true end
+		end
+	end
+
+	local function WarmSplits()
+		local seen, any = {}, false
+		local items = OC.Lockbox.items or {}
+		for i = 1, #items do
+			local it = items[i]
+			local entry = it and not it.coin and tonumber(it.entry)
+			if entry and entry ~= 0 and not seen[entry] and not (sorting.done and sorting.done[entry]) and not Cap(entry) then
+				seen[entry] = true
+				local n = 0
+				for j = 1, #items do
+					local other = items[j]
+					if other and not other.coin and tonumber(other.entry) == entry and (other.count or 0) > 0 and other.index ~= nil then
+						n = n + 1
+					end
+				end
+				if n >= 2 then
+					any = true
+					if OC.UI and OC.UI.WarmItem then OC.UI.WarmItem(entry) end
+				end
+			end
+		end
+		return any
+	end
+
+	local function SendWait(token, message)
+		if sorting.moves >= sorting.limit then return StopSort("it was going round in circles") end
+		if sorting.last == token then return StopSort("a move was refused") end
+		sorting.last = token
+		sorting.moves = sorting.moves + 1
+		sorting.wait = true
+		sorting.since = GetTime()
+		sorting.sig = Signature()
+		OC.Send(message)
+	end
+
 	local function SortStep()
 		if not sorting or not db.sort then return end
 		if not OC.Lockbox.IsOpen() then return StopSort(false) end
 		if OC.Lockbox.readOnly then return StopSort(false) end
 		if GetCursorInfo and GetCursorInfo() then return StopSort("you are holding something") end
+
+		local pull = sorting.pull
+		if pull and OC.CMD_TAKEONE and OC.CMD_DEPOSIT then
+			local rows, total, held = BagRows(pull.entry)
+			local partial = Partials(pull.entry, pull.taken)[1]
+			if partial and CanTake(pull.entry, partial.count or 0) then
+				pull.taken = pull.taken or {}
+				pull.taken[partial.index] = true
+				pull.need = total + (partial.count or 0)
+				pull.phase = "out"
+				return SendWait("T" .. partial.index, OC.CMD_TAKEONE .. partial.index)
+			end
+			local row = rows[1]
+			if row then
+				pull.bag = held
+				pull.phase = "in"
+				return SendWait("P" .. row.bag .. "," .. row.slot, OC.CMD_DEPOSIT .. row.bag .. "," .. row.slot)
+			end
+			if held > total then
+				pull.phase = "hold"
+				sorting.wait = true
+				sorting.since = GetTime()
+				return
+			end
+			sorting.done = sorting.done or {}
+			sorting.done[pull.entry] = true
+			sorting.pull = nil
+		end
+
+		if not sorting.warmed then
+			sorting.warmed = true
+			if WarmSplits() then
+				sorting.warm = true
+				sorting.wait = true
+				sorting.since = GetTime()
+				return
+			end
+		end
+
+		if not sorting.pull and OC.CMD_TAKEONE and OC.CMD_DEPOSIT then
+			local entry = NextSplit()
+			local partial = entry and Partials(entry)[1]
+			if partial and not CanTake(entry, partial.count or 0) then
+				if not sorting.toldFull then
+					sorting.toldFull = true
+					OC.Print("Sort: need a free bag slot to stack open piles.")
+				end
+			elseif partial then
+				local _, total = BagRows(entry)
+				sorting.didPull = true
+				sorting.pull = {
+					entry = entry, phase = "out", taken = { [partial.index] = true },
+					need = total + (partial.count or 0),
+				}
+				return SendWait("T" .. partial.index, OC.CMD_TAKEONE .. partial.index)
+			end
+		end
+
+		if sorting.didPull and not sorting.laidOut then
+			if Signature() == sorting.sig then
+				sorting.chest = true
+				sorting.wait = true
+				sorting.since = GetTime()
+				return
+			end
+			sorting.laidOut = true
+		end
+
 		local moves = PlanSort(OC.Lockbox.items, OC.Lockbox.capacity)
 		local move = moves[1]
 		if not move then return StopSort() end
@@ -499,18 +903,45 @@ local function InstallSort(OC)
 		sorting.wait = true
 		sorting.since = GetTime()
 		sorting.sig = Signature()
+		sorting.pull = nil
 		OC.Send(OC.CMD_MOVE .. token)
+	end
+
+	local function PullAdvance()
+		if not sorting or not sorting.wait or sorting.warm then return end
+		if not sorting.pull then
+			if Signature() ~= sorting.sig then
+				sorting.chest = nil
+				sorting.laidOut = true
+				sorting.wait = false
+				sorting.last = nil
+				SortStep()
+			end
+			return
+		end
+		local pull = sorting.pull
+		local _, total, held = BagRows(pull.entry)
+		local arrived = pull.phase == "hold" and held == total or pull.phase == "in" and held < (pull.bag or 0) or pull.phase ~= "in" and pull.phase ~= "hold" and total >= (pull.need or 0)
+		if not arrived then return end
+		sorting.wait = false
+		sorting.last = nil
+		SortStep()
 	end
 
 	local function StartSort()
 		if not db.sort or sorting or not OC.Lockbox.IsOpen() or OC.Lockbox.readOnly then return end
+		if boxBusy == "deposit" then
+			OC.Print("Deposit is still stacking items.")
+			return
+		end
 		if GetCursorInfo and GetCursorInfo() then
 			OC.Print("Sort: you are holding something.")
 			return
 		end
+		boxBusy = "sort"
 		sorting = {
 			moves = 0, since = GetTime(), wait = false, sig = Signature(),
-			limit = (OC.Lockbox.capacity or 24) * 3 + 10,
+			limit = (OC.Lockbox.capacity or 24) * 3 + 70,
 		}
 		sorter:Show()
 		sortButton:SetText("Stop")
@@ -523,16 +954,27 @@ local function InstallSort(OC)
 	sortButton:SetScript("OnEnter", function()
 		GameTooltip:SetOwner(sortButton, "ANCHOR_BOTTOM")
 		GameTooltip:SetText(sorting and "Stop" or "Sort")
-		GameTooltip:AddLine("Columns fill downward. Common on the left, rarer to the right. Each item keeps its own column when there is room.", 1, 1, 1, true)
+			GameTooltip:AddLine("Open stacks are taken out and put straight back, then the columns fill. Common on the left, rarer to the right.", 1, 1, 1, true)
 		GameTooltip:Show()
 	end)
 	sortButton:SetScript("OnLeave", GameTooltip_Hide)
 
+	sorter:RegisterEvent("BAG_UPDATE")
+	sorter:SetScript("OnEvent", function()
+		PullAdvance()
+	end)
 	sorter:SetScript("OnUpdate", function()
 		if not sorting then return end
 		if not OC.Lockbox.IsOpen() then return StopSort(false) end
 		if GetCursorInfo and GetCursorInfo() then return StopSort("you are holding something") end
-		if sorting.wait and GetTime() - sorting.since > 5 then
+		if sorting.warm and GetTime() - sorting.since > 0.4 then
+			sorting.warm = nil
+			sorting.wait = false
+			SortStep()
+			return
+		end
+		PullAdvance()
+		if sorting and sorting.wait and GetTime() - sorting.since > 2 then
 			StopSort("a move did not finish")
 		end
 	end)
@@ -542,14 +984,7 @@ local function InstallSort(OC)
 	end)
 
 	hooksecurefunc(OC.Lockbox, "Render", function()
-		if sorting and sorting.wait then
-			local sig = Signature()
-			if sig ~= sorting.sig then
-				sorting.sig = sig
-				sorting.wait = false
-				SortStep()
-			end
-		end
+		if sorting and sorting.wait then PullAdvance() end
 		SyncSortButton()
 	end)
 
@@ -575,13 +1010,10 @@ local function InstallShift(OC)
 		if not bag or bag < 0 or bag > 4 then return end
 		local entry = GetContainerItemID(bag, slot)
 		if not ContainerHas(OC, entry) then return end
-		for b = 0, 4 do
-			for s = 1, GetContainerNumSlots(b) or 0 do
-				if GetContainerItemID(b, s) == entry then
-					OC.Send(OC.CMD_DEPOSIT .. b .. "," .. s)
-				end
-			end
-		end
+		local start = StackDeposit(OC)
+		if not start then return end
+		local quality = select(4, GetContainerItemInfo(bag, slot)) or 0
+		start(DepositQueue(OC, entry, quality))
 		return true
 	end
 
