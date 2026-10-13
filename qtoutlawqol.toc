@@ -1,0 +1,9 @@
+## Interface: 30300
+## Title: |cff1784d1qt|rOutlawQoL
+## Notes: Crafting tab, break-down all, shift-click smart deposit, and lockbox sort for OutlawCraft.
+## Author: QT
+## Version: 1.0
+## OptionalDeps: OutlawCraft
+## SavedVariables: qtOutlawQoLDB
+
+Core.lua
