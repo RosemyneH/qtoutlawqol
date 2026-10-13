@@ -1,15 +1,19 @@
 local _G = _G
 local ipairs = ipairs
 local tostring = tostring
+local ClearCursor = ClearCursor
 local GetContainerItemID = GetContainerItemID
 local GetContainerItemInfo = GetContainerItemInfo
 local GetContainerNumSlots = GetContainerNumSlots
 local GetItemInfo = GetItemInfo
 local GetSpellInfo = GetSpellInfo
 local GetTime = GetTime
+local InCombatLockdown = InCombatLockdown
 local IsAltKeyDown = IsAltKeyDown
 local IsControlKeyDown = IsControlKeyDown
 local IsShiftKeyDown = IsShiftKeyDown
+local PickupContainerItem = PickupContainerItem
+local SplitContainerItem = SplitContainerItem
 local hooksecurefunc = hooksecurefunc
 local tinsert = table.insert
 
@@ -140,19 +144,67 @@ local function InstallCraft(OC)
 	return true
 end
 
--- ʕ •ᴥ•ʔ✿ One click for the whole Break down list. Each piece is its own cast, so the next waits until that piece is gone ✿ ʕ •ᴥ•ʔ
+-- ʕ •ᴥ•ʔ✿ One click for the whole Break down list. Each piece is its own cast, so the next waits until that piece is gone. Alt-click holds a piece out of that batch until reload ✿ ʕ •ᴥ•ʔ
 local function InstallBreak(OC)
 	local Builder, UI = OC.Builder, OC.UI
 	if not (Builder and Builder.rows and Builder.Render and UI and UI.Button and OC.Send and OC.CMD_BREAK_DOWN) then return false end
 
 	local BREAK_DOWN = 99
 	local breakQueue, breakSent
+	local heldBreak = {}
 	local breakAll = UI.Button(Builder.frame, "qtOutlawQoLBreakAll", "All", 36, 16)
 	breakAll:Hide()
 
 	local function SalvageByEntry(entry)
 		for _, row in ipairs(Builder.salvage or {}) do
 			if row.entry == entry then return row end
+		end
+	end
+
+	local function CanBreak(row)
+		return row and row.reason == 0 and (row.have or 0) > 0 and not heldBreak[row.entry]
+	end
+
+	local function BatchYield()
+		local totals, order, pieces, leftOut = {}, {}, 0, 0
+		for _, row in ipairs(Builder.salvage or {}) do
+			if row.reason == 0 and (row.have or 0) > 0 then
+				if heldBreak[row.entry] then
+					leftOut = leftOut + 1
+				else
+					pieces = pieces + 1
+					for _, y in ipairs(row.yields or {}) do
+						local id = y.entry
+						if id then
+							local slot = totals[id]
+							if not slot then
+								slot = { entry = id, name = y.name or "Item", count = 0 }
+								totals[id] = slot
+								order[#order + 1] = slot
+							end
+							if y.name and y.name ~= "" then slot.name = y.name end
+							slot.count = slot.count + (y.count or 0) * (row.have or 0)
+						end
+					end
+				end
+			end
+		end
+		table.sort(order, function(a, b)
+			if a.name ~= b.name then return a.name < b.name end
+			return a.entry < b.entry
+		end)
+		return order, pieces, leftOut
+	end
+
+	local function MarkHeld()
+		if not db.breakAll or not UI.Paint then return end
+		for i = 1, #Builder.rows do
+			local row = Builder.rows[i]
+			local recipe = row.button and row.button.recipe
+			if recipe and recipe.salvage and heldBreak[recipe.entry] then
+				row.label:SetText(UI.Paint("dim", recipe.name or ""))
+				row.icon:SetAlpha(0.3)
+			end
 		end
 	end
 
@@ -164,7 +216,7 @@ local function InstallBreak(OC)
 		end
 		local ready = 0
 		for _, row in ipairs(Builder.salvage or {}) do
-			if row.reason == 0 and (row.have or 0) > 0 then ready = ready + 1 end
+			if CanBreak(row) then ready = ready + 1 end
 		end
 		local host
 		if breakQueue or ready > 0 then
@@ -203,7 +255,7 @@ local function InstallBreak(OC)
 		if not breakQueue then return end
 		while #breakQueue > 0 do
 			local row = SalvageByEntry(table.remove(breakQueue, 1))
-			if row and row.reason == 0 and (row.have or 0) > 0 then
+			if CanBreak(row) then
 				SendBreak(row)
 				UpdateBreakAll()
 				return
@@ -218,7 +270,8 @@ local function InstallBreak(OC)
 		local row = SalvageByEntry(breakSent.entry)
 		local have = row and row.have or 0
 		if have < breakSent.have then
-			if row and row.reason == 0 and have > 0 then
+			if CanBreak(row) then
+				if not breakQueue then breakQueue = {} end
 				tinsert(breakQueue, 1, row.entry)
 			end
 			breakSent = nil
@@ -235,7 +288,7 @@ local function InstallBreak(OC)
 		end
 		local queue = {}
 		for _, row in ipairs(Builder.salvage or {}) do
-			if row.reason == 0 and (row.have or 0) > 0 then
+			if CanBreak(row) then
 				tinsert(queue, row.entry)
 			end
 		end
@@ -251,14 +304,72 @@ local function InstallBreak(OC)
 		else
 			GameTooltip:SetText("Break down all")
 			GameTooltip:AddLine("Every piece you can break down, one after another.", 1, 1, 1, true)
+			GameTooltip:AddLine("Alt-click a piece to leave it out until you reload.", 0.65, 0.65, 0.65, true)
+			local yields, pieces, leftOut = BatchYield()
+			if pieces > 0 then
+				GameTooltip:AddLine(pieces == 1 and "1 piece." or (pieces .. " pieces."), 1, 1, 1, true)
+			end
+			for i = 1, #yields do
+				local y = yields[i]
+				if y.count > 0 then
+					GameTooltip:AddLine("|cff20ff20+" .. y.count .. " " .. y.name .. "|r")
+				end
+			end
+			if leftOut > 0 then
+				GameTooltip:AddLine(leftOut == 1 and "1 left out." or (leftOut .. " left out."), 0.8, 0.8, 0.8, true)
+			end
 		end
 		GameTooltip:Show()
 	end)
 	breakAll:SetScript("OnLeave", GameTooltip_Hide)
 
+	local function OnRowClick(self, mouseButton)
+		if mouseButton and mouseButton ~= "LeftButton" then return end
+		if not db.breakAll or not IsAltKeyDown() or IsShiftKeyDown() or IsControlKeyDown() then return end
+		local recipe = self.recipe
+		if not recipe or not recipe.salvage or not recipe.entry then return end
+		local name = recipe.name or "That piece"
+		if heldBreak[recipe.entry] then
+			heldBreak[recipe.entry] = nil
+			Say(name .. " is back in Break down all.")
+		else
+			heldBreak[recipe.entry] = true
+			if breakQueue then
+				local kept = {}
+				for i = 1, #breakQueue do
+					if breakQueue[i] ~= recipe.entry then kept[#kept + 1] = breakQueue[i] end
+				end
+				breakQueue = #kept > 0 and kept or (breakSent and {} or nil)
+			end
+			Say(name .. " left out of Break down all.")
+		end
+		Builder.Render()
+	end
+
+	local function OnRowEnter(self)
+		if not db.breakAll then return end
+		local recipe = self.recipe
+		if not recipe or not recipe.salvage or not GameTooltip:IsShown() then return end
+		if heldBreak[recipe.entry] then
+			GameTooltip:AddLine("Left out of Break down all. Alt-click to put it back.", 1, 0.82, 0, true)
+		else
+			GameTooltip:AddLine("Alt-click to leave this out of Break down all.", 0.65, 0.65, 0.65, true)
+		end
+		GameTooltip:Show()
+	end
+
+	for i = 1, #Builder.rows do
+		local button = Builder.rows[i].button
+		if button then
+			button:HookScript("OnClick", OnRowClick)
+			button:HookScript("OnEnter", OnRowEnter)
+		end
+	end
+
 	hooksecurefunc(Builder, "Render", function()
 		AdvanceBreakQueue()
 		UpdateBreakAll()
+		MarkHeld()
 	end)
 	refresh.breakAll = UpdateBreakAll
 	UpdateBreakAll()
@@ -453,8 +564,8 @@ local function StackDeposit(OC)
 	local function Start(items)
 		if job or not items or #items == 0 then return end
 		if not OC.Lockbox.IsOpen() or OC.Lockbox.readOnly then return end
-		if boxBusy == "sort" then
-			OC.Print("Sort is still running.")
+		if boxBusy == "sort" or boxBusy == "leave" then
+			OC.Print(boxBusy == "leave" and "Leave one is still moving a stack." or "Sort is still running.")
 			return
 		end
 		if GetCursorInfo and GetCursorInfo() then
@@ -930,8 +1041,8 @@ local function InstallSort(OC)
 
 	local function StartSort()
 		if not db.sort or sorting or not OC.Lockbox.IsOpen() or OC.Lockbox.readOnly then return end
-		if boxBusy == "deposit" then
-			OC.Print("Deposit is still stacking items.")
+		if boxBusy == "deposit" or boxBusy == "leave" then
+			OC.Print(boxBusy == "leave" and "Leave one is still moving a stack." or "Deposit is still stacking items.")
 			return
 		end
 		if GetCursorInfo and GetCursorInfo() then
@@ -1024,6 +1135,320 @@ local function InstallShift(OC)
 	return true
 end
 
+-- ʕ •ᴥ•ʔ✿ Alt-click a stack in the chest and one stays behind. The server only takes a whole square, so the stack leaves, one is split off, and that one goes back ✿ ʕ •ᴥ•ʔ
+local function InstallLeave(OC)
+	local slots = OC.Lockbox and OC.Lockbox.slots
+	if not (slots and slots[1] and OC.Send and OC.CMD_TAKEONE and OC.CMD_DEPOSIT and OC.Lockbox.frame) then return false end
+
+	local job
+	local busy
+	local waiter = CreateFrame("Frame")
+	waiter:Hide()
+	waiter:RegisterEvent("BAG_UPDATE")
+	waiter:RegisterEvent("ITEM_LOCK_CHANGED")
+
+	local function Tally(entry, quality)
+		local same, any, empties, room = 0, 0, 0, 0
+		local one, pile
+		local cap = GetItemInfo and select(8, GetItemInfo(entry))
+		entry, quality = tonumber(entry), quality or 0
+		for b = 0, 4 do
+			for s = 1, GetContainerNumSlots(b) or 0 do
+				local id = GetContainerItemID(b, s)
+				if not id then
+					empties = empties + 1
+				elseif tonumber(id) == entry then
+					local _, count, locked, q = GetContainerItemInfo(b, s)
+					count = count or 0
+					q = q or 0
+					any = any + count
+					if q == quality then
+						same = same + count
+						if cap and cap > 1 and count < cap then room = room + (cap - count) end
+					end
+					if not locked then
+						local row = { bag = b, slot = s, count = count, quality = q }
+						if count == 1 and (not one or (q == quality and one.quality ~= quality)) then one = row end
+						if count > 1 and (not pile or (q == quality and pile.quality ~= quality)) then pile = row end
+					end
+				end
+			end
+		end
+		return { same = same, any = any, empties = empties, room = room, cap = cap, one = one, pile = pile }
+	end
+
+	local function EmptiesNeeded(count, scan)
+		local cap = scan.cap
+		if cap and cap > 1 and scan.room >= count then return 1 end
+		if not cap or cap <= 1 then return 2 end
+		local spill = count - scan.room
+		if spill < 0 then spill = 0 end
+		return math.ceil(spill / cap) + 1
+	end
+
+	local function Stop(reason)
+		if not job then return end
+		if job.cursor and GetCursorInfo and GetCursorInfo() and ClearCursor then ClearCursor() end
+		job = nil
+		if boxBusy == "leave" then boxBusy = nil end
+		waiter:Hide()
+		if reason and reason ~= false then OC.Print("Leave one stopped: " .. reason .. ".") end
+	end
+
+	local function EmptySlot()
+		for b = 0, 4 do
+			for s = 1, GetContainerNumSlots(b) or 0 do
+				if not GetContainerItemID(b, s) then return b, s end
+			end
+		end
+	end
+
+	local function ChestLeft()
+		local n = 0
+		local items = OC.Lockbox.items or {}
+		for i = 1, #items do
+			local it = items[i]
+			if it and it.index == job.index and tonumber(it.entry) == job.entry and not it.coin then
+				n = n + (it.count or 0)
+			end
+		end
+		return n
+	end
+
+	local function SendBack(row)
+		job.phase = "back"
+		job.since = GetTime()
+		job.bag, job.slot = row.bag, row.slot
+		job.cursor = nil
+		OC.Send(OC.CMD_DEPOSIT .. row.bag .. "," .. row.slot)
+	end
+
+	local function Run()
+		if not job then return end
+		if not OC.Lockbox.IsOpen() then return Stop(false) end
+		if job.pause then
+			job.pause = nil
+			return
+		end
+		if GetTime() - job.since > 5 then return Stop("a move did not finish") end
+
+		local scan = Tally(job.entry, job.quality)
+		local have = job.loose and scan.any or scan.same
+
+		if job.phase == "out" then
+			if ChestLeft() >= job.count then return end
+			if scan.same >= job.sameBefore + job.count then
+				job.want = job.sameBefore + job.count - 1
+			elseif scan.any >= job.anyBefore + job.count then
+				job.loose = true
+				job.want = job.anyBefore + job.count - 1
+				have = scan.any
+			else
+				return
+			end
+			job.phase = "return"
+			job.since = GetTime()
+		end
+
+		if job.phase == "back" then
+			if have <= job.want then Stop(false) end
+			return
+		end
+
+		if job.phase == "cursor" then
+			if not (GetCursorInfo and GetCursorInfo()) then return end
+			local bag, slot = EmptySlot()
+			if not bag or not PickupContainerItem then return end
+			if InCombatLockdown and InCombatLockdown() then return Stop("you are in combat") end
+			job.phase = "place"
+			job.since = GetTime()
+			job.bag, job.slot = bag, slot
+			job.pause = true
+			PickupContainerItem(bag, slot)
+			return
+		end
+
+		if job.phase == "place" then
+			if GetCursorInfo and GetCursorInfo() then return end
+			local id = GetContainerItemID(job.bag, job.slot)
+			local _, count, locked = GetContainerItemInfo(job.bag, job.slot)
+			if tonumber(id) == job.entry and (count or 0) == 1 and not locked then
+				job.cursor = nil
+				SendBack({ bag = job.bag, slot = job.slot })
+			end
+			return
+		end
+
+		if have <= job.want then return Stop(false) end
+		local one = scan.one
+		if one and (job.loose or one.quality == job.quality) then return SendBack(one) end
+		if InCombatLockdown and InCombatLockdown() then return Stop("you are in combat") end
+		if job.phase == "return" and (not scan.pile or scan.empties < 1 or not SplitContainerItem) then return end
+		if not scan.pile or not SplitContainerItem then return end
+		if not job.loose and scan.pile.quality ~= job.quality then return end
+		job.phase = "cursor"
+		job.cursor = true
+		job.pause = true
+		job.since = GetTime()
+		local ok = pcall(SplitContainerItem, scan.pile.bag, scan.pile.slot, 1)
+		if not ok then
+			job.cursor = nil
+			job.phase = "return"
+			Stop("could not split one off")
+		end
+	end
+
+	local function Step()
+		if busy or not job then return end
+		busy = true
+		Run()
+		busy = false
+	end
+
+	waiter:SetScript("OnEvent", Step)
+	waiter:SetScript("OnUpdate", Step)
+	if OC.Lockbox.Render then
+		hooksecurefunc(OC.Lockbox, "Render", function()
+			if job then Step() end
+		end)
+	end
+	OC.Lockbox.frame:HookScript("OnHide", function()
+		if job then Stop(false) end
+	end)
+
+	local function LeaveClick(slot)
+		if slot.ocPressDeposited then return end
+		if GetCursorInfo and GetCursorInfo() then return end
+		if not slot.index or slot.coin then return end
+		if OC.Lockbox.readOnly then return end
+		if not IsAltKeyDown() or IsShiftKeyDown() or IsControlKeyDown() then return end
+		local count = tonumber(slot.count) or 0
+		if count <= 1 then return end
+		if job then return true end
+		if boxBusy == "sort" then
+			OC.Print("Sort is still running.")
+			return true
+		end
+		if boxBusy == "deposit" then
+			OC.Print("Deposit is still stacking items.")
+			return true
+		end
+		local scan = Tally(slot.entry, slot.quality)
+		if scan.empties < EmptiesNeeded(count, scan) then
+			OC.Print("Leave one: need a free bag slot.")
+			return true
+		end
+		job = {
+			entry = tonumber(slot.entry), quality = slot.quality or 0, index = slot.index, count = count,
+			sameBefore = scan.same, anyBefore = scan.any, phase = "out", since = GetTime(),
+		}
+		boxBusy = "leave"
+		waiter:Show()
+		OC.Send(OC.CMD_TAKEONE .. slot.index)
+		return true
+	end
+
+	for i = 1, #slots do
+		local slot = slots[i]
+		local orig = slot:GetScript("OnClick")
+		slot:SetScript("OnClick", function(self)
+			if LeaveClick(self) then return end
+			if orig then orig() end
+		end)
+		slot:HookScript("OnEnter", function(self)
+			local count = tonumber(self.count) or 0
+			if self.coin or count <= 1 or OC.Lockbox.readOnly or not GameTooltip:IsShown() then return end
+			GameTooltip:AddLine("Alt-click to take all but one.", 0.65, 0.65, 0.65, true)
+			GameTooltip:Show()
+		end)
+	end
+	return true
+end
+
+-- ʕ ◕ᴥ◕ ʔ✿ Alt-click a material in the crafting window and the list opens on the recipe that makes it ✿ ʕ ◕ᴥ◕ ʔ
+local function InstallRecipe(OC)
+	local Builder = OC.Builder
+	if not (Builder and Builder.Select and Builder.Render and Builder.IsCollapsed and Builder.ToggleCategory) then return false end
+
+	local function Pick(entry)
+		local list, entryId = {}, tonumber(entry)
+		if not entryId or entryId == 0 then return end
+		for _, recipe in ipairs(Builder.recipes or {}) do
+			if not recipe.salvage and not recipe.coins then
+				local made = tonumber(recipe.item or recipe.entry)
+				if made == entryId then list[#list + 1] = recipe end
+			end
+		end
+		if #list == 0 then return end
+		for i = 1, #list do
+			if (list[i].key or list[i].entry) == Builder.selected then
+				return list[(i % #list) + 1]
+			end
+		end
+		return list[1]
+	end
+
+	local function ScrollTo(recipe)
+		local lines = Builder.lines or {}
+		local key = recipe.key or recipe.entry
+		local index
+		for i = 1, #lines do
+			local line = lines[i]
+			if line.recipe and (line.recipe.key or line.recipe.entry) == key then
+				index = i
+				break
+			end
+		end
+		local scroll = Builder.scrollFrame
+		local bar = _G.OutlawCraftBuilderScrollScrollBar
+		if not index or not scroll or not bar or not FauxScrollFrame_SetOffset then return end
+		local rowH = 18
+		local visible = math.floor((scroll:GetHeight() or rowH) / rowH + 0.5)
+		if visible < 1 then visible = 1 end
+		local offset = math.max(0, math.min(index - 1, #lines - visible))
+		FauxScrollFrame_SetOffset(scroll, offset)
+		bar:SetValue(offset * rowH)
+	end
+
+	local function ShowMade(entry, name)
+		local recipe = Pick(entry)
+		if not recipe then
+			OC.Print("Nothing on your crafting list makes " .. ((name and name ~= "") and name or "that") .. ".")
+			return
+		end
+		local search = _G.OutlawCraftBuilderSearch
+		if search and search.GetText and search.SetText then
+			local text = string.lower(strtrim(search:GetText() or ""))
+			local recipeName = string.lower(recipe.name or "")
+			if text ~= "" and not string.find(recipeName, text, 1, true) then search:SetText("") end
+		end
+		local category = recipe.category or 0
+		if Builder.IsCollapsed(category) then Builder.ToggleCategory(category) end
+		Builder.Select(recipe.key or recipe.entry)
+		ScrollTo(recipe)
+	end
+
+	local hooked
+	for k = 1, 8 do
+		local slot = _G["OutlawCraftBuilderReagent" .. k]
+		if slot then
+			hooked = true
+			slot:RegisterForClicks("LeftButtonUp")
+			slot:SetScript("OnClick", function(self)
+				if not IsAltKeyDown() or IsShiftKeyDown() or IsControlKeyDown() then return end
+				if not self.entry then return end
+				ShowMade(self.entry, self.plainName)
+			end)
+			slot:HookScript("OnEnter", function(self)
+				if not self.entry or not GameTooltip:IsShown() or not Pick(self.entry) then return end
+				GameTooltip:AddLine("Alt-click to show its recipe.", 0.65, 0.65, 0.65, true)
+				GameTooltip:Show()
+			end)
+		end
+	end
+	return hooked
+end
+
 local function Attempt()
 	local OC = _G.OutlawCraft
 	if not OC then return false end
@@ -1033,7 +1458,9 @@ local function Attempt()
 	if not installed.deposit then installed.deposit = InstallDeposit(OC) end
 	if not installed.sort then installed.sort = InstallSort(OC) end
 	if not installed.shift then installed.shift = InstallShift(OC) end
-	return installed.craft and installed.breakAll and installed.deposit and installed.sort and installed.shift
+	if not installed.leave then installed.leave = InstallLeave(OC) end
+	if not installed.recipe then installed.recipe = InstallRecipe(OC) end
+	return installed.craft and installed.breakAll and installed.deposit and installed.sort and installed.shift and installed.leave and installed.recipe
 end
 
 local waiter = CreateFrame("Frame")
